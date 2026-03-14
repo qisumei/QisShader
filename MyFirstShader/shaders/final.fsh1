@@ -1,0 +1,88 @@
+#version 330
+
+uniform sampler2D colortex0;
+uniform float viewWidth;
+uniform float viewHeight;
+
+in vec2 texCoord;
+layout(location = 0) out vec4 outColor;
+
+// 引入屏幕抖动，用于彻底打碎大半径下的模糊断层
+float getDitherNoise(vec2 pos) {
+    return fract(52.9829189 * fract(dot(pos, vec2(0.06711056, 0.00583715))));
+}
+
+vec3 ACESFilm(vec3 x) {
+    float a = 2.51; float b = 0.03; float c = 2.43; float d = 0.59; float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+    // 读取未调色的超高亮度 HDR 画面
+    vec3 color = texture(colortex0, texCoord).rgb;
+    
+    // ==========================================
+    // 【真·电影级大尺度后处理 Bloom 引擎】
+    // ==========================================
+    vec3 bloom = vec3(0.0);
+    int samples = 64;          // 高采样率
+    
+    // 【核心巨变 1：超大扩散半径】从 0.025 飙升到 0.20（屏幕的 20%！）
+    float maxRadius = 0.20;    
+    float angle = 2.39996323;  // 黄金螺旋角度
+    
+    // 获取屏幕级别的像素随机偏移，让每次采样都产生微小旋转，完美融合大光晕！
+    float dither = getDitherNoise(gl_FragCoord.xy) * 6.2831853;
+    
+    vec2 aspect = vec2(viewHeight / viewWidth, 1.0);
+    float totalWeight = 0.0;
+    
+    for(int i = 1; i <= samples; i++) {
+        // r 的范围从 0.0 到 1.0
+        float r = float(i) / float(samples);
+        
+        // 【核心巨变 2：指数级半径扩张】
+        // 近处采样密集（保留火把刺眼的核心），远处采样稀疏（形成大范围的柔和泛光）
+        float currentRadius = pow(r, 2.0) * maxRadius;
+        
+        // 加入 dither 旋转，彻底消除条纹感
+        float theta = float(i) * angle + dither;
+        vec2 offset = vec2(cos(theta), sin(theta)) * currentRadius * aspect;
+        
+        // 防止采样飞出屏幕外导致黑边
+        vec2 sampleUV = texCoord + offset;
+        if(sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) continue;
+        
+        vec3 sampleColor = texture(colortex0, sampleUV).rgb;
+        float brightness = dot(sampleColor, vec3(0.2126, 0.7152, 0.0722));
+        
+        // 【能量提取】抓取亮度大于 1.2 的真实物理发光体（岩浆、火把、太阳）
+        if (brightness > 1.2) {
+            // 距离越远，权重越低。光晕向外会像烟雾一样自然消散
+            float weight = exp(-r * 4.0); 
+            bloom += sampleColor * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    if (totalWeight > 0.0) {
+        bloom /= totalWeight;
+    }
+    
+    // 【狂暴叠光】将提取出来的巨量发光能量暴力叠加回原图！(0.25 控制整体光晕强度)
+    color += bloom * 0.25; 
+    
+    // ==========================================
+    // 【收尾魔法：暗角与色调映射】
+    // ==========================================
+    float vignette = length(texCoord - 0.5);
+    vignette = smoothstep(0.8, 0.2, vignette);
+    color *= vignette;
+
+    // 用 ACES 护眼墨镜，把叠加辉光后爆炸的亮度重新压制成美丽的色彩层次
+    float exposure = 1.05; 
+    color = ACESFilm(color * exposure);
+    color = pow(color, vec3(1.0 / 2.2));
+
+    outColor = vec4(color, 1.0);
+}
